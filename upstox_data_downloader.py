@@ -65,60 +65,86 @@ def create_stock_table(symbol):
     table.create(engine, checkfirst=True)
     return table
 
-def get_stock_data(symbol, from_date, to_date):
-    """Fetch stock data from Upstox API"""
+def get_stock_data(symbol, to_date):
+    """Fetch stock data from Upstox API in reverse chronological order"""
     try:
         # Get instrument keys
         instrument_keys_df = get_latest_instrument_keys()
         
         # Find the instrument key for this symbol
-        instrument_key = instrument_keys_df[instrument_keys_df['symbol'] == symbol]['instrument_key'].iloc[0]
-        
-        if not instrument_key:
+        symbol_data = instrument_keys_df[instrument_keys_df['symbol'] == symbol]
+        if symbol_data.empty:
             print(f"Instrument key not found for symbol: {symbol}")
             return None
             
+        instrument_key = symbol_data['instrument_key'].iloc[0]
+        
         headers = {
             'Accept': 'application/json',
             'Authorization': f'Bearer {ACCESS_TOKEN}'
         }
         
         # Format dates for API
-        if isinstance(from_date, datetime):
-            from_date = from_date.date()
         if isinstance(to_date, datetime):
             to_date = to_date.date()
         
-        # Format dates as strings
-        from_date_str = from_date.strftime('%Y-%m-%d')
-        to_date_str = to_date.strftime('%Y-%m-%d')
+        all_data = []
+        current_to_date = to_date
         
-        # API endpoint for historical data - using day interval
-        url = f"{BASE_URL}/historical-candle/{instrument_key}/days/1/{to_date_str}/{from_date_str}"
+        while True:
+            try:
+                # Calculate from_date (10 years before current_to_date)
+                from_date = current_to_date - timedelta(days=3650)
+                
+                # Format dates as strings
+                from_date_str = from_date.strftime('%Y-%m-%d')
+                to_date_str = current_to_date.strftime('%Y-%m-%d')
+                
+                # API endpoint for historical data - using day interval
+                url = f"{BASE_URL}/historical-candle/{instrument_key}/days/1/{to_date_str}/{from_date_str}"
+                
+                print(f"Requesting data from {from_date_str} to {to_date_str}")
+                
+                response = requests.get(url, headers=headers)
+                print(f"Response status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('status') == 'success' and data.get('data', {}).get('candles'):
+                        candles = data['data']['candles']
+                        if candles:
+                            all_data.extend(candles)
+                            print(f"Retrieved {len(candles)} records")
+                        else:
+                            print("No data in this period")
+                            break
+                    else:
+                        print("API returned error status")
+                        break
+                else:
+                    print(f"API request failed with status {response.status_code}")
+                    break
+                
+                # Move to_date back by 10 years for next iteration
+                current_to_date = from_date
+                
+            except Exception as e:
+                print(f"Error fetching data for {symbol}: {str(e)}")
+                break
         
-        print(f"Requesting URL: {url}")  # Debug print
-        
-        response = requests.get(url, headers=headers)
-        print(f"Response status: {response.status_code}")  # Debug print
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('status') == 'success':
-            df = pd.DataFrame(data['data']['candles'], 
+        if all_data:
+            df = pd.DataFrame(all_data, 
                             columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi'])
-            # Convert timestamp to IST (timestamps are already UTC-aware)
+            # Convert timestamp to IST
             df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(IST)
+            # Sort by timestamp in ascending order
+            df = df.sort_values('timestamp')
+            print(f"Total records retrieved: {len(df)}")
             return df
         else:
-            print(f"Error fetching data for {symbol}: {data.get('message', 'Unknown error')}")
+            print(f"No data found for {symbol}")
             return None
             
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data for {symbol}: {str(e)}")
-        if hasattr(e, 'response') and hasattr(e.response, 'text'):
-            print(f"Error response: {e.response.text}")
-        return None
     except Exception as e:
         print(f"Error processing data for {symbol}: {str(e)}")
         return None
@@ -139,29 +165,37 @@ def store_data_in_db(symbol, df):
     # Store data in database
     clean_symbol = symbol.replace('.NS', '').replace('^', '').replace('-', '_')
     table_name = clean_symbol  # Removed 'stock_' prefix
-    df.to_sql(table_name, engine, if_exists='append', index=False)
+    df.to_sql(table_name, engine, if_exists='replace', index=False)
     print(f"Stored {len(df)} records for {symbol}")
+
+def get_symbols_from_file():
+    """Read symbols from symbols.tls file"""
+    try:
+        with open('symbols.tls', 'r') as f:
+            symbols = [line.strip() for line in f if line.strip()]
+        return symbols
+    except FileNotFoundError:
+        print("symbols.tls file not found")
+        return []
 
 def main():
     try:
-        # Get instrument keys
-        instrument_keys_df = get_latest_instrument_keys()
-        symbols = instrument_keys_df['symbol'].tolist()
+        # Get symbols from file
+        symbols = get_symbols_from_file()
+        if not symbols:
+            print("No symbols found in symbols.tls")
+            return
+            
+        print(f"Processing {len(symbols)} symbols")
         
-        # Test with first 5 symbols
-        test_symbols = symbols[:5]
-        print(f"Testing with symbols: {test_symbols}")
-        
-        # Set fixed date range as specified
-        start_date = datetime.strptime('2025-01-01', '%Y-%m-%d').date()
+        # Set end date
         end_date = datetime.strptime('2025-04-17', '%Y-%m-%d').date()
-        
-        print(f"Fetching data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        print(f"Fetching data up to: {end_date.strftime('%Y-%m-%d')}")
         
         # Fetch and store data for each symbol
-        for symbol in test_symbols:
-            print(f"\nProcessing {symbol}...")
-            df = get_stock_data(symbol, start_date, end_date)
+        for i, symbol in enumerate(symbols, 1):
+            print(f"\nProcessing {i}/{len(symbols)}: {symbol}...")
+            df = get_stock_data(symbol, end_date)
             if df is not None:
                 store_data_in_db(symbol, df)
         
