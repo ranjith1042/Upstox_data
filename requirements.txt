@@ -1,5 +1,12 @@
 requests==2.31.0
-pandas==2.1.4
+pandas
+numpy
 sqlalchemy==2.0.25
 python-dotenv==1.0.0
-beautifulsoup4==4.12.2 
+beautifulsoup4==4.12.2
+xgboost
+scikit-learn
+yfinance==0.2.36
+matplotlib
+seaborn
+tqdm 
